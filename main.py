@@ -100,14 +100,26 @@ async def timescaledb_batch_writer():
 # =============================================================================
 async def broadcast_to_ui(payload: dict[str, Any]):
     dead: list[WebSocket] = []
+    tasks = []
     for ws in ui_clients:
+        tasks.append(asyncio.create_task(safe_send(ws, payload)))
+    
+    # Wait for all sends with timeout
+    done, pending = await asyncio.wait(tasks, timeout=0.05)
+    for task in done:
         try:
-            await ws.send_json(payload)
+            await task
         except Exception:
-            dead.append(ws)
-    for ws in dead:
-        if ws in ui_clients:
-            ui_clients.remove(ws)
+            pass
+    # Cancel remaining
+    for task in pending:
+        task.cancel()
+
+async def safe_send(ws: WebSocket, payload: dict):
+    try:
+        await ws.send_json(payload)
+    except Exception:
+        raise
 
 # =============================================================================
 # FASTAPI LIFESPAN
@@ -253,3 +265,11 @@ if __name__ == "__main__":
         log_level="warning"
     )
 
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "online",
+        "ring_buffer_size": len(ring_buffer),
+        "db_connected": db_pool is not None,
+        "clients": len(ui_clients)
+    }

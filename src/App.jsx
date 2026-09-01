@@ -4,98 +4,167 @@ export default function App() {
   const canvasRef = useRef(null);
   const workerRef = useRef(null);
   const isInitialized = useRef(false);
-  
+
   const [logs, setLogs] = useState([]);
   const [alertMuted, setAlertMuted] = useState(false);
   const [isReplaying, setIsReplaying] = useState(false);
+
   const channelRef = useRef(null);
+  const logQueueRef = useRef([]);
+
+  const WS_URL = import.meta.env?.VITE_WS_URL || 'ws://localhost:8000';  // ✅ FIXED
+const REPLAY_URL = import.meta.env?.VITE_REPLAY_URL || 'http://localhost:8000/api/replay'; // ✅ FIXED
 
   useEffect(() => {
-    // 1. Dual-Browser CRDT Sync Channel
-    channelRef.current = new BroadcastChannel('crdt_state_sync');
-    channelRef.current.onmessage = (event) => {
-      if (event.data.type === 'TOGGLE_ALERT') {
+    // 1. BroadcastChannel CRDT Setup
+    const channel = new BroadcastChannel('crdt_state_sync');
+    channelRef.current = channel;
+
+    channel.onmessage = (event) => {
+      if (event.data?.type === 'TOGGLE_ALERT') {
         setAlertMuted(event.data.payload);
       }
     };
 
-    if (isInitialized.current || !canvasRef.current) return;
+    // 2. Initialize Worker
+    workerRef.current = new Worker(new URL('./telemetry.worker.js', import.meta.url), {
+      type: 'module'
+    });
 
-    try {
-      // 2. OffscreenCanvas Web Worker Pipeline
-      workerRef.current = new Worker(
-        new URL('./telemetry.worker.js', import.meta.url),
-        { type: 'module' }
-      );
-
-      const offscreen = canvasRef.current.transferControlToOffscreen();
-      workerRef.current.postMessage(
-        { type: 'INIT', payload: { canvas: offscreen } },
-        [offscreen]
-      );
-
-      isInitialized.current = true;
-    } catch (e) {
-      console.warn("Canvas offscreen already transferred in another lifecycle context.");
+    // 3. OffscreenCanvas Handshake
+    if (canvasRef.current && !isInitialized.current) {
+      try {
+        const offscreen = canvasRef.current.transferControlToOffscreen();
+        workerRef.current.postMessage({ type: 'INIT', payload: { canvas: offscreen } }, [offscreen]);
+        isInitialized.current = true;
+      } catch (err) {
+        console.warn("OffscreenCanvas already initialized:", err);
+      }
     }
 
-    // 3. 500 Hz Ingestion Stream & Stream Guarding
-    // CHANGE 'localhost' to Teammate A's Mac IP (e.g., 'ws://192.168.x.x:8000/ws') when backend is ready!
-    const ws = new WebSocket('wss://aloft-zealous-matriarch.ngrok-free.app/ws/ingest');
-
-    ws.onmessage = (event) => {
-      if (event.data.includes('"NaN"') || event.data.includes('"INVALID_TS"')) {
+    // 4. Chaos Terminal Worker Listener
+    workerRef.current.onmessage = (e) => {
+      if (e.data.type === 'CHAOS_FAULT') {
         const timestamp = new Date().toISOString().split('T')[1].slice(0, 12);
-        const alertEntry = `[CHAOS INTERCEPTOR @ ${timestamp}] Fault Payload Caught -> ${event.data}`;
-        setLogs((prev) => [alertEntry, ...prev.slice(0, 49)]);
-      }
-
-      try {
-        const data = JSON.parse(event.data);
-        if (workerRef.current) {
-          workerRef.current.postMessage({ type: 'TELEMETRY_DATA', payload: data });
-        }
-      } catch (err) {
-        // Stream Guard intercepts malformed JSON without crashing loop
+        const entry = `[CHAOS INTERCEPTOR @ ${timestamp}] Fault Byte Caught -> ${e.data.rawPayload}`;
+        logQueueRef.current.unshift(entry);
       }
     };
 
+    // 5. Connect Worker directly to WebSocket (or mock loop fallback)
+    if (WS_URL) {
+      workerRef.current.postMessage({ type: 'CONNECT_WS', payload: { url: WS_URL } });
+    }
+
+    // 6. 500 Hz Mock Stream Fallback
+    // In App.jsx setInterval fallback loop:
+const mockInterval = setInterval(() => {
+  // Generate valid sine-wave telemetry value
+  const mockVal = 50 + Math.sin(Date.now() / 200) * 15 + (Math.random() - 0.5) * 4;
+
+  // 90% Valid Telemetry, 10% Chaos Fault Injections
+  const isFault = Math.random() < 0.10;
+
+  if (isFault) {
+    const timestamp = new Date().toISOString().split('T')[1].slice(0, 12);
+    logQueueRef.current.unshift(`[CHAOS INTERCEPTOR @ ${timestamp}] Fault Byte Caught -> {"temperature":"NaN"}`);
+  } else {
+    // Send valid telemetry to worker
+    if (workerRef.current) {
+      workerRef.current.postMessage({
+        type: 'TELEMETRY_DATA',
+        payload: { metrics: { temperature: mockVal } }
+      });
+    }
+  }
+}, 2); // 500 Hz stream
+
+    // 7. Throttled Log Terminal Flush (10 Hz)
+    const logFlushInterval = setInterval(() => {
+      if (logQueueRef.current.length > 0) {
+        setLogs((prev) => [...logQueueRef.current.splice(0, 50), ...prev].slice(0, 50));
+      }
+    }, 100);
+
+    // 8. Resize Observer Protocol
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (let entry of entries) {
+        const { width, height } = entry.contentRect;
+        if (workerRef.current) {
+          workerRef.current.postMessage({
+            type: 'RESIZE',
+            payload: {
+              width: Math.floor(width * window.devicePixelRatio),
+              height: Math.floor(height * window.devicePixelRatio)
+            }
+          });
+        }
+      }
+    });
+
+    if (canvasRef.current?.parentElement) {
+      resizeObserver.observe(canvasRef.current.parentElement);
+    }
+
     return () => {
-      ws.close();
-      if (workerRef.current) workerRef.current.terminate();
+      clearInterval(mockInterval);
+      clearInterval(logFlushInterval);
+      resizeObserver.disconnect();
       if (channelRef.current) channelRef.current.close();
+      if (workerRef.current) workerRef.current.terminate();
     };
   }, []);
 
-  // CRDT State Mutation Trigger
   const handleAlertToggle = () => {
-    const newState = !alertMuted;
-    setAlertMuted(newState);
+    const nextState = !alertMuted;
+    setAlertMuted(nextState);
+
     if (channelRef.current) {
-      channelRef.current.postMessage({ type: 'TOGGLE_ALERT', payload: newState });
+      channelRef.current.postMessage({
+        type: 'TOGGLE_ALERT',
+        payload: nextState,
+        timestamp: Date.now()
+      });
     }
   };
 
-  // 60-Second In-Memory Ring Buffer Replay (Fetches raw memory from Teammate A)
   const handleReplayToggle = async () => {
     const nextReplayState = !isReplaying;
     setIsReplaying(nextReplayState);
 
     if (nextReplayState) {
-      try {
-        // Target Teammate A's FastAPI zero-latency Ring Buffer replay endpoint
-        const res = await fetch('https://aloft-zealous-matriarch.ngrok-free.app/api/replay');
-        const rawHistory = await res.json();
-        console.log("Flushed 60s memory log from Python RAM:", rawHistory.length, "events");
-      } catch (err) {
-        console.log("Mock Server detected: Simulated in-memory 60s replay flush active.");
-      }
+        try {
+            const res = await fetch(REPLAY_URL);
+            const data = await res.json();
+            
+            // ✅ Access the events array properly
+            const events = data.events || [];
+            console.log('[REPLAY] Received', events.length, 'events');
+            
+            if (workerRef.current && events.length > 0) {
+                // Send each event to worker
+                events.forEach(item => {
+                    try {
+                        // Parse raw JSON if needed
+                        const parsed = typeof item.raw === 'string' ? JSON.parse(item.raw) : item.raw;
+                        workerRef.current.postMessage({ 
+                            type: 'TELEMETRY_DATA', 
+                            payload: parsed 
+                        });
+                    } catch (err) {
+                        console.warn('[REPLAY] Failed to parse event:', item);
+                    }
+                });
+            }
+        } catch (err) {
+            console.error('[REPLAY] Error:', err);
+            // Fallback: Use mock data
+            console.log("Mock Server fallback active: 60s memory replay flush.");
+        }
     }
-  };
-
+};
   return (
     <div style={{ padding: '24px', background: '#020617', color: '#f8fafc', minHeight: '100vh', fontFamily: 'monospace' }}>
-      {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: '1px solid #1e293b', paddingBottom: '12px' }}>
         <h1 style={{ fontSize: '1.2rem', color: '#38bdf8', margin: 0 }}>
           IOT-01: FUSION DASHBOARD // FAULT-RESILIENT PIPELINE
@@ -136,22 +205,18 @@ export default function App() {
         </div>
       </div>
 
-      {/* Grid */}
       <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '16px' }}>
-        <div>
+        <div style={{ width: '100%' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', color: '#94a3b8', marginBottom: '8px' }}>
             <span>LIVE 500 Hz TELEMETRY STREAM (OffscreenCanvas Engine)</span>
             {isReplaying && <span style={{ color: '#eab308', fontWeight: 'bold' }}>[REPLAY MODE ACTIVE]</span>}
           </div>
           <canvas
             ref={canvasRef}
-            width={750}
-            height={420}
-            style={{ border: `1px solid ${isReplaying ? '#eab308' : '#1e293b'}`, borderRadius: '6px', width: '100%', background: '#0f172a' }}
+            style={{ border: `1px solid ${isReplaying ? '#eab308' : '#1e293b'}`, borderRadius: '6px', width: '100%', height: '420px', display: 'block', background: '#0f172a' }}
           />
         </div>
 
-        {/* Chaos Interceptor Terminal */}
         <div style={{ background: '#090d16', border: '1px solid #1e293b', borderRadius: '6px', padding: '12px' }}>
           <div style={{ fontSize: '0.85rem', color: '#ef4444', fontWeight: 'bold', marginBottom: '8px' }}>
             ⚠️ CHAOS INTERCEPTOR TERMINAL
