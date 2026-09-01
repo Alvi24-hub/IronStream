@@ -99,7 +99,7 @@ export default function App() {
         }
 
         if (e.data.type === 'WS_CONNECTED') {
-          console.log('✅ WebSocket connected');
+          console.log('WebSocket connected');
           setIsWsConnected(true);
         }
 
@@ -108,7 +108,7 @@ export default function App() {
         }
 
         if (e.data.type === 'TEST_MESSAGE') {
-          console.log('[APP] ✅ Test message from worker:', e.data.payload);
+          console.log('[APP] Test message from worker:', e.data.payload);
         }
       });
     }
@@ -320,7 +320,7 @@ export default function App() {
         zIndex: 1
       }}>
         <h1 style={{ fontSize: '1rem', color: accent, margin: 0, letterSpacing: '0.5px', textShadow: '0 0 20px rgba(245,158,11,0.15)' }}>
-          IOT-01: FUSION DASHBOARD // FAULT-RESILIENT PIPELINE
+          IRONSTREAM
         </h1>
         <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
           <div style={{ display: 'flex', gap: '8px' }}>
@@ -356,7 +356,7 @@ export default function App() {
             backdropFilter: 'blur(4px)',
             transition: 'all 0.2s'
           }}>
-            {isPaused ? '▶️ RESUME' : '⏸️ PAUSE'}
+            {isPaused ? 'RESUME' : 'PAUSE'}
           </button>
           <button onClick={handleReplayToggle} style={{
             background: isReplaying ? accent : 'rgba(42,49,60,0.3)',
@@ -370,7 +370,7 @@ export default function App() {
             backdropFilter: 'blur(4px)',
             transition: 'all 0.2s'
           }}>
-            {isReplaying ? '⏩ REPLAYING' : '⏪ REPLAY LAST 60S'}
+            {isReplaying ? 'REPLAYING' : 'REPLAY LAST 60S'}
           </button>
           <button onClick={handleAlertToggle} style={{
             background: alertMuted ? 'rgba(42,49,60,0.4)' : success,
@@ -384,7 +384,7 @@ export default function App() {
             backdropFilter: 'blur(4px)',
             transition: 'all 0.2s'
           }}>
-            {alertMuted ? '🔇 ALERTS INACTIVE' : '🔊 ALERTS ACTIVE'}
+            {alertMuted ? 'ALERTS INACTIVE' : 'ALERTS ACTIVE'}
           </button>
         </div>
       </div>
@@ -496,7 +496,7 @@ export default function App() {
                   <span style={{ color: '#14B8A6' }}>T: {tooltip.temp}</span>
                   <span style={{ color: '#F59E0B' }}>V: {tooltip.vib}</span>
                   <span style={{ color: '#94A3B8' }}>{tooltip.device}</span>
-                  {tooltip.isFault && <span style={{ color: '#EF4444' }}>⚠️ Fault</span>}
+                  {tooltip.isFault && <span style={{ color: '#EF4444' }}>Fault</span>}
                 </div>
               </div>
             )}

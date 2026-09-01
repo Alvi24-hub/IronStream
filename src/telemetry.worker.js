@@ -61,7 +61,7 @@ function connectWebSocket(url) {
   try {
     ws = new WebSocket(url);
     ws.onopen = () => {
-      console.log('[WORKER] ✅ WebSocket connected');
+      console.log('[WORKER] WebSocket connected');
       self.postMessage({ type: 'WS_CONNECTED' });
       // Send test message every 2 seconds to verify communication
       setInterval(() => {
@@ -77,7 +77,7 @@ function connectWebSocket(url) {
         const data = JSON.parse(event.data);
         console.log('[WORKER] Parsed:', data.type || 'unknown');
         self.postMessage({ type: 'TELEMETRY_DATA', payload: data });
-        console.log('[WORKER] ✅ TELEMETRY_DATA sent to main thread');
+        console.log('[WORKER] TELEMETRY_DATA sent to main thread');
         if (!paused) {
           processData(data, false);
         }
@@ -159,7 +159,7 @@ function processData(data, isReplay) {
         raw: JSON.stringify(data)
       }
     });
-    console.log('[WORKER] ✅ FAULT_EVENT sent to main thread');
+    console.log('[WORKER] FAULT_EVENT sent to main thread');
   }
 
   const hasTemp = temp !== null && !isNaN(temp) && typeof temp === 'number';
