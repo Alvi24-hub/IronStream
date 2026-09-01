@@ -402,3 +402,19 @@ async def rate_limited_replay(request: Request):
 async def rate_limited_historical(request: Request):
     """Historical endpoint with rate limiting"""
     return {"message": "Historical data endpoint (rate limited)"}
+
+# ============================================================
+# REQUEST LOGGING MIDDLEWARE
+# ============================================================
+
+from app.middleware import RequestLoggingMiddleware
+
+# Add middleware (add it before other middleware)
+app.add_middleware(RequestLoggingMiddleware)
+
+# Configure logging format
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
