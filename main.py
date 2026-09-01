@@ -278,3 +278,188 @@ async def health_check():
         "db_connected": db_pool is not None,
         "clients": len(ui_clients)
     }
+# ============================================================
+# HEALTH CHECK - Added to existing main.py
+# ============================================================
+
+@app.get("/health")
+async def health_check():
+    """Enhanced health check with system status"""
+    import psutil
+    from datetime import datetime
+    
+    # Get WebSocket stats
+    ws_stats = {}
+    if 'websocket_manager' in globals() and websocket_manager:
+        ws_stats = {
+            "active_connections": len(websocket_manager.clients),
+            "status": "healthy"
+        }
+    else:
+        ws_stats = {"status": "not_initialized"}
+    
+    # Get buffer stats
+    buffer_stats = {}
+    if 'ring_buffer' in globals() and ring_buffer:
+        buffer_stats = {
+            "size": len(ring_buffer),
+            "max_size": ring_buffer._maxlen if hasattr(ring_buffer, '_maxlen') else 30000,
+            "status": "healthy"
+        }
+    else:
+        buffer_stats = {"status": "not_initialized"}
+    
+    # System metrics
+    try:
+        system_stats = {
+            "cpu_percent": psutil.cpu_percent(interval=0.1),
+            "memory_percent": psutil.virtual_memory().percent,
+            "disk_usage": psutil.disk_usage('/').percent,
+        }
+    except:
+        system_stats = {"status": "psutil not available"}
+    
+    return {
+        "status": "online",
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": "2.0.0",
+        "services": {
+            "websocket": ws_stats,
+            "ring_buffer": buffer_stats,
+            "api": {"status": "healthy"},
+            "system": system_stats
+        }
+    }
+
+@app.get("/health/readiness")
+async def readiness():
+    """Kubernetes readiness probe"""
+    return {"status": "ready"}
+
+@app.get("/health/liveness")
+async def liveness():
+    """Kubernetes liveness probe"""
+    return {"status": "alive"}
+
+
+
+# ============================================================
+# CLEAN METRICS - Using metrics.py
+# ============================================================
+
+from metrics import get_metrics, get_content_type, update_websocket_count, update_ring_buffer_count
+from fastapi import Response
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint"""
+    if 'websocket_manager' in globals() and websocket_manager:
+        update_websocket_count(len(websocket_manager.clients))
+    if 'ring_buffer' in globals() and ring_buffer:
+        update_ring_buffer_count(len(ring_buffer))
+    
+    return Response(
+        content=get_metrics(),
+        media_type=get_content_type()
+    )
+
+# ============================================================
+# RATE LIMITING (REST endpoints only)
+# ============================================================
+
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+# Create rate limiter
+limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
+
+# Add exception handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Apply to specific endpoints
+@app.get("/api/replay")
+@limiter.limit("60/minute")
+async def rate_limited_replay(request: Request):
+    """Replay endpoint with rate limiting"""
+    if ring_buffer is None:
+        return {"error": "Ring buffer not initialized"}
+    
+    try:
+        events = await ring_buffer.get_snapshot()
+        return {
+            "events": events,
+            "count": len(events),
+            "capacity": ring_buffer._maxlen if hasattr(ring_buffer, '_maxlen') else 30000,
+            "replay_ms": int(time.time() * 1000)
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/historical")
+@limiter.limit("30/minute")
+async def rate_limited_historical(request: Request):
+    """Historical endpoint with rate limiting"""
+    return {"message": "Historical data endpoint (rate limited)"}
+
+# ============================================================
+# REQUEST LOGGING MIDDLEWARE
+# ============================================================
+
+from app.middleware import RequestLoggingMiddleware
+
+# Add middleware (add it before other middleware)
+app.add_middleware(RequestLoggingMiddleware)
+
+# Configure logging format
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+# ============================================================
+# DATA VALIDATION
+# ============================================================
+
+from app.models import SensorData, HistoricalQuery, ReplayQuery
+
+# Ingest endpoint with validation
+@app.post("/api/ingest")
+async def ingest_sensor_data(data: SensorData):
+    """Ingest sensor data with validation"""
+    try:
+        # Process validated data
+        # Your existing ingestion logic here
+        return {
+            "status": "success",
+            "message": f"Data from {data.device_id} ingested",
+            "data": data.dict()
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# Replay endpoint with validation
+@app.get("/api/replay/validated")
+async def replay_validated(query: ReplayQuery = Depends()):
+    """Replay endpoint with validated query parameters"""
+    if ring_buffer is None:
+        return {"error": "Ring buffer not initialized"}
+    
+    try:
+        events = await ring_buffer.get_snapshot()
+        if query.device_id:
+            events = [e for e in events if e.get('device_id') == query.device_id]
+        
+        events = events[-query.limit:] if query.limit else events
+        
+        return {
+            "events": events,
+            "count": len(events),
+            "limit": query.limit,
+            "offset": query.offset,
+            "device_id": query.device_id
+        }
+    except Exception as e:
+        return {"error": str(e)}
