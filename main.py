@@ -340,3 +340,25 @@ async def readiness():
 async def liveness():
     """Kubernetes liveness probe"""
     return {"status": "alive"}
+
+
+
+# ============================================================
+# CLEAN METRICS - Using metrics.py
+# ============================================================
+
+from metrics import get_metrics, get_content_type, update_websocket_count, update_ring_buffer_count
+from fastapi import Response
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint"""
+    if 'websocket_manager' in globals() and websocket_manager:
+        update_websocket_count(len(websocket_manager.clients))
+    if 'ring_buffer' in globals() and ring_buffer:
+        update_ring_buffer_count(len(ring_buffer))
+    
+    return Response(
+        content=get_metrics(),
+        media_type=get_content_type()
+    )
