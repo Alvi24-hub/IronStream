@@ -1,17 +1,20 @@
 """
-IronStream — FastAPI Ingestion Pipeline
-Teammate A (M2 MacBook Air) | Python 3.11+ | uvloop | redis.asyncio
+IronStream — FastAPI Ingestion Pipeline with TimescaleDB Batch Persistence
+Teammate A (M2 MacBook Air) | Python 3.11+ | uvloop | asyncpg
 """
 from __future__ import annotations
 
 import asyncio
 import collections
 import json
+import os
 import time
+import getpass
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import asyncpg
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 # =============================================================================
@@ -20,16 +23,21 @@ from fastapi.responses import JSONResponse
 RING_BUFFER_SIZE = 30_000          # 500 evt/s × 60 s
 FAULT_MARKERS = [b'"NaN"', b'"INVALID_TS"', b'"null"', b'"undefined"', b'NaN']
 
+# Automatically use current macOS user for Homebrew PostgreSQL compatibility
+db_user = getpass.getuser()
+DATABASE_URL = os.getenv("DATABASE_URL", f"postgresql://{db_user}@localhost:5432/ironstream")
+
+BATCH_SIZE = 500
+FLUSH_INTERVAL_SEC = 2.0
+
 # =============================================================================
-# IN-MEMORY STATE 
+# IN-MEMORY STATE & DB POOL
 # =============================================================================
 ring_buffer: collections.deque[dict[str, Any]] = collections.deque(maxlen=RING_BUFFER_SIZE)
+db_batch_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100_000)
 ui_clients: list[WebSocket] = []
 
-crdt_state: dict[str, Any] = {
-    "alert_level": "normal",
-    "sequence": 0
-}
+db_pool: asyncpg.Pool | None = None
 
 # =============================================================================
 # STREAM INSPECTION GUARD 
@@ -40,6 +48,53 @@ def stream_inspection_guard(raw_bytes: bytes) -> tuple[bool, list[str]]:
         if marker in raw_bytes:
             flags.append(marker.decode("utf-8", errors="replace"))
     return len(flags) > 0, flags
+
+# =============================================================================
+# BACKGROUND TIMESCALEDB BATCH WRITER
+# =============================================================================
+async def timescaledb_batch_writer():
+    global db_pool
+    while True:
+        await asyncio.sleep(FLUSH_INTERVAL_SEC)
+        if db_pool is None:
+            continue
+        
+        batch = []
+        while not db_batch_queue.empty() and len(batch) < BATCH_SIZE:
+            try:
+                batch.append(db_batch_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+                
+        if not batch:
+            continue
+
+        try:
+            async with db_pool.acquire() as conn:
+                records = []
+                for item in batch:
+                    ts = item["ts"]
+                    dt = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts / 1000))
+                    device_id = item["device_id"]
+                    payload = item["payload"]
+                    is_fault = item["type"] == "fault"
+                    
+                    metrics = payload.get("metrics", {})
+                    temp = metrics.get("temperature") if isinstance(metrics.get("temperature"), (int, float)) else None
+                    vib = metrics.get("vibration") if isinstance(metrics.get("vibration"), (int, float)) else None
+                    raw_str = json.dumps(payload)
+
+                    records.append((dt, device_id, temp, vib, is_fault, raw_str))
+
+                await conn.executemany(
+                    """
+                    INSERT INTO sensor_metrics (time, device_id, temperature, vibration, is_fault, raw_payload)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    records
+                )
+        except Exception as exc:
+            print(f"[DB-FLUSH-ERROR] Failed to write batch to TimescaleDB: {exc}")
 
 # =============================================================================
 # UI BROADCAST
@@ -60,8 +115,20 @@ async def broadcast_to_ui(payload: dict[str, Any]):
 # =============================================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global db_pool
     print("[SYSTEM] IronStream Pipeline Online | uvloop active")
+    try:
+        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+        print("[DB] Connected to TimescaleDB pool successfully")
+    except Exception as exc:
+        print(f"[DB-WARN] Running without TimescaleDB persistence: {exc}")
+        db_pool = None
+
+    writer_task = asyncio.create_task(timescaledb_batch_writer())
     yield
+    writer_task.cancel()
+    if db_pool:
+        await db_pool.close()
     print("[SYSTEM] Shutting down...")
 
 app = FastAPI(title="IronStream Dashboard", lifespan=lifespan)
@@ -75,7 +142,6 @@ async def websocket_ingest(websocket: WebSocket):
     print("[INGEST] Sensor stream connected")
     try:
         while True:
-            # Accept either text or binary frames without crashing
             message = await websocket.receive()
             if "text" in message:
                 raw_text = message["text"]
@@ -86,9 +152,11 @@ async def websocket_ingest(websocket: WebSocket):
             else:
                 continue
 
+            current_ts = time.time_ns() // 1_000_000
+
             # Zero-Allocation Ring Buffer
             ring_buffer.append({
-                "ts": time.time_ns() // 1_000_000,
+                "ts": current_ts,
                 "raw": raw_text
             })
 
@@ -109,8 +177,15 @@ async def websocket_ingest(websocket: WebSocket):
                 "device_id": device_id,
                 "flags": flags,
                 "payload": parsed if not is_corrupted else {"raw": raw_text},
-                "ts": time.time_ns() // 1_000_000
+                "ts": current_ts
             }
+
+            # Enqueue for DB batch persistence (non-blocking)
+            if db_pool and not db_batch_queue.full():
+                try:
+                    db_batch_queue.put_nowait(ui_payload)
+                except asyncio.QueueFull:
+                    pass
 
             await broadcast_to_ui(ui_payload)
 
@@ -131,6 +206,39 @@ async def replay_last_60s():
         "replay_ms": time.time_ns() // 1_000_000
     })
 
+# =============================================================================
+# HISTORICAL QUERY ENDPOINT (TimescaleDB)
+# =============================================================================
+@app.get("/api/historical")
+async def get_historical_data(
+    device_id: str | None = Query(None, description="Filter by sensor ID"),
+    limit: int = Query(100, ge=1, le=1000)
+):
+    if not db_pool:
+        return JSONResponse(status_code=503, content={"error": "TimescaleDB connection not active"})
+    
+    try:
+        async with db_pool.acquire() as conn:
+            if device_id:
+                rows = await conn.fetch(
+                    "SELECT time, device_id, temperature, vibration, is_fault, raw_payload FROM sensor_metrics WHERE device_id = $1 ORDER BY time DESC LIMIT $2",
+                    device_id, limit
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT time, device_id, temperature, vibration, is_fault, raw_payload FROM sensor_metrics ORDER BY time DESC LIMIT $1",
+                    limit
+                )
+            
+            data = [dict(row) for row in rows]
+            for d in data:
+                if "time" in d and d["time"]:
+                    d["time"] = d["time"].isoformat()
+
+            return JSONResponse(content={"count": len(data), "data": data})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
@@ -141,5 +249,4 @@ if __name__ == "__main__":
         workers=1,
         log_level="warning"
     )
-
 
