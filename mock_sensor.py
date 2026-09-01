@@ -38,7 +38,7 @@ def generate_event(fault: bool = False) -> str:
     return json.dumps(base)
 
 async def sensor_stream():
-    async with websockets.connect(URI) as ws:
+    async with websockets.connect(URI, ping_interval=20, ping_timeout=20) as ws:
         print(f"[MOCK] Sensor online @ {RATE_HZ} Hz | Fault rate: {FAULT_RATE*100:.0f}%")
         while True:
             is_fault = random.random() < FAULT_RATE

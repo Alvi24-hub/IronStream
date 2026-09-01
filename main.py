@@ -73,7 +73,8 @@ async def timescaledb_batch_writer():
                 records = []
                 for item in batch:
                     ts = item["ts"]
-                    dt = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts / 1000))
+                    from datetime import datetime
+                    dt = datetime.fromtimestamp(ts / 1000)
                     device_id = item["device_id"]
                     payload = item["payload"]
                     is_fault = item["type"] == "fault"
@@ -155,8 +156,12 @@ async def websocket_ingest(websocket: WebSocket):
     try:
         while True:
             message = await websocket.receive()
-            if message.get("type") == "websocket.disconnect":
+            msg_type = message.get("type")
+            if msg_type == "websocket.disconnect":
                 break
+            if msg_type == "websocket.ping":
+                await websocket.send({ "type": "websocket.pong" })
+                continue
 
             if "text" in message:
                 raw_text = message["text"]
