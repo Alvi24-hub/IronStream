@@ -41,7 +41,7 @@ export default function App() {
 
     // 3. 500 Hz Ingestion Stream & Stream Guarding
     // CHANGE 'localhost' to Teammate A's Mac IP (e.g., 'ws://192.168.x.x:8000/ws') when backend is ready!
-    const ws = new WebSocket('ws://localhost:8080');
+    const ws = new WebSocket('wss://aloft-zealous-matriarch.ngrok-free.app/ws/ingest');
 
     ws.onmessage = (event) => {
       if (event.data.includes('"NaN"') || event.data.includes('"INVALID_TS"')) {
@@ -84,7 +84,7 @@ export default function App() {
     if (nextReplayState) {
       try {
         // Target Teammate A's FastAPI zero-latency Ring Buffer replay endpoint
-        const res = await fetch('http://localhost:8080/api/replay');
+        const res = await fetch('https://aloft-zealous-matriarch.ngrok-free.app/api/replay');
         const rawHistory = await res.json();
         console.log("Flushed 60s memory log from Python RAM:", rawHistory.length, "events");
       } catch (err) {
