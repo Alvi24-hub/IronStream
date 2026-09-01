@@ -341,132 +341,24 @@ async def liveness():
     """Kubernetes liveness probe"""
     return {"status": "alive"}
 
+
+
 # ============================================================
-# PROMETHEUS METRICS
+# CLEAN METRICS - Using metrics.py
 # ============================================================
 
-from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from metrics import get_metrics, get_content_type, update_websocket_count, update_ring_buffer_count
 from fastapi import Response
-
-# Metrics definitions
-EVENTS_INGESTED = Counter(
-    'events_ingested_total',
-    'Total events ingested via WebSocket',
-    ['device_id', 'status']
-)
-
-FAULTS_DETECTED = Counter(
-    'faults_detected_total',
-    'Total faults detected',
-    ['fault_type', 'device_id']
-)
-
-WEBSOCKET_CONNECTIONS = Gauge(
-    'websocket_connections_active',
-    'Active WebSocket connections'
-)
-
-EVENT_PROCESSING_TIME = Histogram(
-    'event_processing_seconds',
-    'Time to process an event',
-    buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5]
-)
-
-RING_BUFFER_SIZE = Gauge(
-    'ring_buffer_size',
-    'Current size of ring buffer'
-)
-
-DB_QUERY_TIME = Histogram(
-    'db_query_seconds',
-    'Database query duration',
-    ['query_type']
-)
 
 @app.get("/metrics")
 async def metrics():
     """Prometheus metrics endpoint"""
-    # Update ring buffer size
-    if ring_buffer:
-        RING_BUFFER_SIZE.set(len(ring_buffer))
-    
-    # Update WebSocket connections
-    if websocket_manager:
-        WEBSOCKET_CONNECTIONS.set(len(websocket_manager.clients))
-    
-    return Response(
-        content=generate_latest(),
-        media_type=CONTENT_TYPE_LATEST
-    )
-
-# Helper functions
-def increment_events(device_id: str = "unknown", status: str = "success"):
-    EVENTS_INGESTED.labels(device_id=device_id, status=status).inc()
-
-def increment_faults(fault_type: str, device_id: str = "unknown"):
-    FAULTS_DETECTED.labels(fault_type=fault_type, device_id=device_id).inc()
-
-# ============================================================
-# PROMETHEUS METRICS
-# ============================================================
-
-from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
-from fastapi import Response
-
-# Metrics definitions
-EVENTS_INGESTED = Counter(
-    'events_ingested_total',
-    'Total events ingested via WebSocket',
-    ['device_id', 'status']
-)
-
-FAULTS_DETECTED = Counter(
-    'faults_detected_total',
-    'Total faults detected',
-    ['fault_type', 'device_id']
-)
-
-WEBSOCKET_CONNECTIONS = Gauge(
-    'websocket_connections_active',
-    'Active WebSocket connections'
-)
-
-EVENT_PROCESSING_TIME = Histogram(
-    'event_processing_seconds',
-    'Time to process an event',
-    buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5]
-)
-
-RING_BUFFER_SIZE = Gauge(
-    'ring_buffer_size',
-    'Current size of ring buffer'
-)
-
-DB_QUERY_TIME = Histogram(
-    'db_query_seconds',
-    'Database query duration',
-    ['query_type']
-)
-
-@app.get("/metrics")
-async def metrics():
-    """Prometheus metrics endpoint"""
-    # Update ring buffer size
-    if 'ring_buffer' in globals() and ring_buffer:
-        RING_BUFFER_SIZE.set(len(ring_buffer))
-    
-    # Update WebSocket connections
     if 'websocket_manager' in globals() and websocket_manager:
-        WEBSOCKET_CONNECTIONS.set(len(websocket_manager.clients))
+        update_websocket_count(len(websocket_manager.clients))
+    if 'ring_buffer' in globals() and ring_buffer:
+        update_ring_buffer_count(len(ring_buffer))
     
     return Response(
-        content=generate_latest(),
-        media_type=CONTENT_TYPE_LATEST
+        content=get_metrics(),
+        media_type=get_content_type()
     )
-
-# Helper functions
-def increment_events(device_id: str = "unknown", status: str = "success"):
-    EVENTS_INGESTED.labels(device_id=device_id, status=status).inc()
-
-def increment_faults(fault_type: str, device_id: str = "unknown"):
-    FAULTS_DETECTED.labels(fault_type=fault_type, device_id=device_id).inc()
