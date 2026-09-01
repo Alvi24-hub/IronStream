@@ -23,7 +23,6 @@ from fastapi.responses import JSONResponse
 RING_BUFFER_SIZE = 30_000          # 500 evt/s × 60 s
 FAULT_MARKERS = [b'"NaN"', b'"INVALID_TS"', b'"null"', b'"undefined"', b'NaN']
 
-# Automatically use current macOS user for Homebrew PostgreSQL compatibility
 db_user = getpass.getuser()
 DATABASE_URL = os.getenv("DATABASE_URL", f"postgresql://{db_user}@localhost:5432/ironstream")
 
@@ -139,10 +138,14 @@ app = FastAPI(title="IronStream Dashboard", lifespan=lifespan)
 @app.websocket("/ws/ingest")
 async def websocket_ingest(websocket: WebSocket):
     await websocket.accept()
+    ui_clients.append(websocket)
     print("[INGEST] Sensor stream connected")
     try:
         while True:
             message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+
             if "text" in message:
                 raw_text = message["text"]
                 raw_bytes = raw_text.encode("utf-8")
@@ -154,13 +157,11 @@ async def websocket_ingest(websocket: WebSocket):
 
             current_ts = time.time_ns() // 1_000_000
 
-            # Zero-Allocation Ring Buffer
             ring_buffer.append({
                 "ts": current_ts,
                 "raw": raw_text
             })
 
-            # Stream Inspection Guard
             is_corrupted, flags = stream_inspection_guard(raw_bytes)
 
             device_id = "unknown"
@@ -180,7 +181,6 @@ async def websocket_ingest(websocket: WebSocket):
                 "ts": current_ts
             }
 
-            # Enqueue for DB batch persistence (non-blocking)
             if db_pool and not db_batch_queue.full():
                 try:
                     db_batch_queue.put_nowait(ui_payload)
@@ -193,6 +193,9 @@ async def websocket_ingest(websocket: WebSocket):
         print("[INGEST] Sensor stream disconnected")
     except Exception as exc:
         print(f"[INGEST-FAULT] Unhandled exception: {exc}")
+    finally:
+        if websocket in ui_clients:
+            ui_clients.remove(websocket)
 
 # =============================================================================
 # REPLAY ENDPOINT (O(1) Flush from RAM)
