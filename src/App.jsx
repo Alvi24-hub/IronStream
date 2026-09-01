@@ -7,6 +7,7 @@ export default function App() {
   const isInitialized = useRef(false);
 
   const [alertMuted, setAlertMuted] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
   const [isReplaying, setIsReplaying] = useState(false);
   const [faultCount, setFaultCount] = useState(0);
   const [totalEvents, setTotalEvents] = useState(0);
@@ -18,6 +19,7 @@ export default function App() {
   const [latestVib, setLatestVib] = useState(null);
   const [isWsConnected, setIsWsConnected] = useState(false);
   const [faultLog, setFaultLog] = useState([]);
+  const [tooltip, setTooltip] = useState({ visible: false, x: 0, y: 0, ts: '', temp: '', vib: '', device: '', isFault: false });
 
   const WS_URL = 'ws://172.16.44.68:8000/ws/ingest';
   const REPLAY_URL = 'http://172.16.44.68:8000/api/replay';
@@ -30,6 +32,7 @@ export default function App() {
   const sensorIds = Array.from({ length: 16 }, (_, i) => `sensor_f1_${String(i + 1).padStart(2, '0')}`);
 
   useEffect(() => {
+    // BroadcastChannel
     const channel = new BroadcastChannel('crdt_state_sync');
     channelRef.current = channel;
     channel.onmessage = (event) => {
@@ -38,12 +41,15 @@ export default function App() {
       }
     };
 
+    // Create worker
     if (!workerRef.current) {
       workerRef.current = new Worker(new URL('./telemetry.worker.js', import.meta.url), {
         type: 'module'
       });
 
-      workerRef.current.onmessage = (e) => {
+      workerRef.current.addEventListener('message', (e) => {
+        console.log('[APP] Received message type:', e.data.type);
+
         if (e.data.type === 'TELEMETRY_DATA') {
           const data = e.data.payload;
           const deviceId = data.device_id || data.device || 'unknown';
@@ -53,10 +59,8 @@ export default function App() {
           if (temp !== undefined && !isNaN(temp) && typeof temp === 'number') {
             setLatestTemp(temp);
             if (vib !== undefined && !isNaN(vib)) setLatestVib(vib);
-
             setTotalEvents(prev => prev + 1);
             eventCountRef.current += 1;
-
             const now = Date.now();
             setSensorData(prev => ({
               ...prev,
@@ -74,7 +78,6 @@ export default function App() {
           const fault = e.data.payload;
           setFaultCount(prev => prev + 1);
           faultCountRef.current += 1;
-
           setFaultLog(prev => {
             const newEntry = {
               time: fault.ts ? new Date(fault.ts).toLocaleTimeString() : new Date().toLocaleTimeString(),
@@ -84,7 +87,6 @@ export default function App() {
             };
             return [newEntry, ...prev].slice(0, 50);
           });
-
           const deviceId = fault.device_id || 'unknown';
           setSensorData(prev => ({
             ...prev,
@@ -100,9 +102,18 @@ export default function App() {
           console.log('✅ WebSocket connected');
           setIsWsConnected(true);
         }
-      };
+
+        if (e.data.type === 'TOOLTIP') {
+          setTooltip(e.data.payload);
+        }
+
+        if (e.data.type === 'TEST_MESSAGE') {
+          console.log('[APP] ✅ Test message from worker:', e.data.payload);
+        }
+      });
     }
 
+    // OffscreenCanvas init
     if (canvasRef.current && !isInitialized.current) {
       try {
         const offscreen = canvasRef.current.transferControlToOffscreen();
@@ -127,6 +138,29 @@ export default function App() {
       workerRef.current.postMessage({ type: 'CONNECT_WS', payload: { url: WS_URL } });
     }
 
+    // --- Mouse hover events (no early return) ---
+    const canvasContainer = canvasRef.current?.parentElement;
+    const mouseMoveHandler = (e) => {
+      if (!canvasRef.current || isPaused) return;
+      const rect = canvasRef.current.getBoundingClientRect();
+      const x = (e.clientX - rect.left) * (canvasRef.current.width / rect.width);
+      const y = (e.clientY - rect.top) * (canvasRef.current.height / rect.height);
+      if (workerRef.current) {
+        workerRef.current.postMessage({ type: 'HOVER', payload: { x, y } });
+      }
+    };
+    const mouseLeaveHandler = () => {
+      setTooltip({ visible: false, x: 0, y: 0, ts: '', temp: '', vib: '', device: '', isFault: false });
+      if (workerRef.current) {
+        workerRef.current.postMessage({ type: 'HOVER', payload: { x: null } });
+      }
+    };
+    if (canvasContainer) {
+      canvasContainer.addEventListener('mousemove', mouseMoveHandler);
+      canvasContainer.addEventListener('mouseleave', mouseLeaveHandler);
+    }
+
+    // --- Stats interval (now it will run because no early return) ---
     const statsInterval = setInterval(() => {
       const now = Date.now();
       const elapsed = (now - lastRateCalc.current) / 1000;
@@ -136,11 +170,14 @@ export default function App() {
         const rate = total > 0 ? Math.round((faults / total) * 100) : 0;
         setEventsPerSec(total);
         setFaultRate(rate);
+        console.log('[STATS] total:', total, 'faults:', faults, 'rate:', rate);
+        // Reset counters for next second
         eventCountRef.current = 0;
         faultCountRef.current = 0;
         lastRateCalc.current = now;
       }
 
+      // Update uptime
       const diff = Date.now() - startTime;
       const seconds = Math.floor(diff / 1000);
       const minutes = Math.floor(seconds / 60);
@@ -154,12 +191,18 @@ export default function App() {
       setUptime(uptimeStr);
     }, 1000);
 
+    // --- Cleanup function ---
     return () => {
       clearInterval(statsInterval);
+      if (canvasContainer) {
+        canvasContainer.removeEventListener('mousemove', mouseMoveHandler);
+        canvasContainer.removeEventListener('mouseleave', mouseLeaveHandler);
+      }
       if (channelRef.current) channelRef.current.close();
     };
   }, []);
 
+  // Handlers
   const handleAlertToggle = () => {
     const newState = !alertMuted;
     setAlertMuted(newState);
@@ -169,6 +212,14 @@ export default function App() {
         payload: newState,
         timestamp: Date.now()
       });
+    }
+  };
+
+  const handlePauseToggle = () => {
+    const newPause = !isPaused;
+    setIsPaused(newPause);
+    if (workerRef.current) {
+      workerRef.current.postMessage({ type: 'PAUSE', payload: { paused: newPause } });
     }
   };
 
@@ -196,6 +247,7 @@ export default function App() {
     }
   };
 
+  // Active sensors
   const now = Date.now();
   let activeCount = 0;
   const sensorStatus = {};
@@ -206,11 +258,21 @@ export default function App() {
     sensorStatus[id] = isActive ? 'active' : 'inactive';
   });
 
+  // Glassmorphism constants
+  const glassBg = 'rgba(20, 24, 32, 0.65)';
+  const glassBorder = 'rgba(42, 49, 60, 0.35)';
+  const accent = '#F59E0B';
+  const success = '#10B981';
+  const danger = '#EF4444';
+  const textPrimary = '#F1F5F9';
+  const textSecondary = '#94A3B8';
+  const chartLine = '#14B8A6';
+
   return (
     <div style={{
       padding: '12px 20px',
-      background: '#020617',
-      color: '#f8fafc',
+      background: '#0B0E14',
+      color: textPrimary,
       width: '100vw',
       height: '100vh',
       overflow: 'hidden',
@@ -218,166 +280,281 @@ export default function App() {
       fontFamily: 'monospace',
       display: 'flex',
       flexDirection: 'column',
-      gap: '6px'
+      gap: '6px',
+      position: 'relative'
     }}>
+      {/* Background glows */}
+      <div style={{
+        position: 'absolute',
+        top: '-20%',
+        right: '-10%',
+        width: '40%',
+        height: '40%',
+        background: 'radial-gradient(circle, rgba(245,158,11,0.06) 0%, transparent 70%)',
+        pointerEvents: 'none'
+      }} />
+      <div style={{
+        position: 'absolute',
+        bottom: '-20%',
+        left: '-10%',
+        width: '40%',
+        height: '40%',
+        background: 'radial-gradient(circle, rgba(20,184,166,0.05) 0%, transparent 70%)',
+        pointerEvents: 'none'
+      }} />
+
       {/* Header */}
       <div style={{
         display: 'flex',
         justifyContent: 'space-between',
         alignItems: 'center',
-        borderBottom: '1px solid #1e293b',
-        paddingBottom: '6px',
-        flexShrink: 0
+        padding: '8px 16px',
+        background: glassBg,
+        backdropFilter: 'blur(12px)',
+        WebkitBackdropFilter: 'blur(12px)',
+        borderRadius: '12px',
+        border: `1px solid ${glassBorder}`,
+        boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+        flexShrink: 0,
+        position: 'relative',
+        zIndex: 1
       }}>
-        <h1 style={{ fontSize: '1rem', color: '#38bdf8', margin: 0 }}>
+        <h1 style={{ fontSize: '1rem', color: accent, margin: 0, letterSpacing: '0.5px', textShadow: '0 0 20px rgba(245,158,11,0.15)' }}>
           IOT-01: FUSION DASHBOARD // FAULT-RESILIENT PIPELINE
         </h1>
         <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
           <div style={{ display: 'flex', gap: '8px' }}>
             <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-              <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: isWsConnected ? '#22c55e' : '#ef4444' }}></span>
-              <span style={{ fontSize: '0.55rem', color: '#94a3b8' }}>WS</span>
+              <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: isWsConnected ? success : danger, boxShadow: `0 0 8px ${isWsConnected ? success : danger}` }} />
+              <span style={{ fontSize: '0.55rem', color: textSecondary }}>WS</span>
             </span>
             <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-              <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#22c55e' }}></span>
-              <span style={{ fontSize: '0.55rem', color: '#94a3b8' }}>Backend</span>
+              <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: success, boxShadow: `0 0 8px ${success}` }} />
+              <span style={{ fontSize: '0.55rem', color: textSecondary }}>Backend</span>
             </span>
           </div>
           <span style={{
             fontSize: '0.55rem',
-            background: faultCount > 0 && !alertMuted ? '#7f1d1d' : '#1e293b',
-            color: faultCount > 0 && !alertMuted ? '#fca5a5' : '#475569',
-            padding: '2px 8px',
-            borderRadius: '10px',
-            fontWeight: 'bold'
+            background: faultCount > 0 && !alertMuted ? danger : 'rgba(42,49,60,0.4)',
+            color: faultCount > 0 && !alertMuted ? '#F1F5F9' : textSecondary,
+            padding: '2px 10px',
+            borderRadius: '20px',
+            fontWeight: 'bold',
+            border: `1px solid ${faultCount > 0 && !alertMuted ? danger : 'transparent'}`
           }}>
             ⚡ {faultCount} faults
           </span>
-          <button onClick={handleReplayToggle} style={{
-            background: isReplaying ? '#eab308' : '#3b82f6',
-            color: '#000',
-            border: 'none',
-            padding: '3px 10px',
-            borderRadius: '4px',
+          <button onClick={handlePauseToggle} style={{
+            background: isPaused ? accent : 'rgba(42,49,60,0.3)',
+            color: isPaused ? '#000' : textPrimary,
+            border: `1px solid ${isPaused ? accent : glassBorder}`,
+            padding: '3px 12px',
+            borderRadius: '6px',
             fontWeight: 'bold',
             cursor: 'pointer',
-            fontSize: '0.65rem'
+            fontSize: '0.65rem',
+            backdropFilter: 'blur(4px)',
+            transition: 'all 0.2s'
+          }}>
+            {isPaused ? '▶️ RESUME' : '⏸️ PAUSE'}
+          </button>
+          <button onClick={handleReplayToggle} style={{
+            background: isReplaying ? accent : 'rgba(42,49,60,0.3)',
+            color: isReplaying ? '#000' : textPrimary,
+            border: `1px solid ${isReplaying ? accent : glassBorder}`,
+            padding: '3px 12px',
+            borderRadius: '6px',
+            fontWeight: 'bold',
+            cursor: 'pointer',
+            fontSize: '0.65rem',
+            backdropFilter: 'blur(4px)',
+            transition: 'all 0.2s'
           }}>
             {isReplaying ? '⏩ REPLAYING' : '⏪ REPLAY LAST 60S'}
           </button>
           <button onClick={handleAlertToggle} style={{
-            background: alertMuted ? '#475569' : '#22c55e',
-            color: alertMuted ? '#94a3b8' : '#fff',
-            border: 'none',
-            padding: '3px 10px',
-            borderRadius: '4px',
+            background: alertMuted ? 'rgba(42,49,60,0.4)' : success,
+            color: alertMuted ? textSecondary : '#000',
+            border: `1px solid ${alertMuted ? glassBorder : success}`,
+            padding: '3px 12px',
+            borderRadius: '6px',
             fontWeight: 'bold',
             cursor: 'pointer',
-            fontSize: '0.65rem'
+            fontSize: '0.65rem',
+            backdropFilter: 'blur(4px)',
+            transition: 'all 0.2s'
           }}>
-            {alertMuted ? '🔇 MUTED' : '🔊 ACTIVE'}
+            {alertMuted ? '🔇 ALERTS INACTIVE' : '🔊 ALERTS ACTIVE'}
           </button>
         </div>
       </div>
 
       {/* Stats Panel */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px', flexShrink: 0 }}>
-        <div style={{ background: '#0f172a', padding: '4px 10px', borderRadius: '4px' }}>
-          <div style={{ fontSize: '0.5rem', color: '#64748b' }}>Events/sec</div>
-          <div style={{ fontSize: '1rem', color: '#38bdf8', fontWeight: 'bold' }}>{eventsPerSec}</div>
-        </div>
-        <div style={{ background: '#0f172a', padding: '4px 10px', borderRadius: '4px' }}>
-          <div style={{ fontSize: '0.5rem', color: '#64748b' }}>Fault Rate</div>
-          <div style={{ fontSize: '1rem', color: '#eab308', fontWeight: 'bold' }}>{faultRate}%</div>
-        </div>
-        <div style={{ background: '#0f172a', padding: '4px 10px', borderRadius: '4px' }}>
-          <div style={{ fontSize: '0.5rem', color: '#64748b' }}>Active Sensors</div>
-          <div style={{ fontSize: '1rem', color: '#22c55e', fontWeight: 'bold' }}>{activeCount}/{sensorIds.length}</div>
-        </div>
-        <div style={{ background: '#0f172a', padding: '4px 10px', borderRadius: '4px' }}>
-          <div style={{ fontSize: '0.5rem', color: '#64748b' }}>Uptime</div>
-          <div style={{ fontSize: '1rem', color: '#94a3b8', fontWeight: 'bold' }}>{uptime}</div>
-        </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px', flexShrink: 0, position: 'relative', zIndex: 1 }}>
+        {[
+          { label: 'Events/sec', value: eventsPerSec, color: accent },
+          { label: 'Fault Rate', value: faultRate + '%', color: accent },
+          { label: 'Active Sensors', value: `${activeCount}/${sensorIds.length}`, color: success },
+          { label: 'Uptime', value: uptime, color: textPrimary }
+        ].map((stat, idx) => (
+          <div key={idx} style={{
+            background: glassBg,
+            backdropFilter: 'blur(12px)',
+            WebkitBackdropFilter: 'blur(12px)',
+            borderRadius: '10px',
+            padding: '6px 12px',
+            border: `1px solid ${glassBorder}`,
+            boxShadow: '0 4px 16px rgba(0,0,0,0.2)',
+            textAlign: 'center'
+          }}>
+            <div style={{ fontSize: '0.5rem', color: textSecondary, textTransform: 'uppercase', letterSpacing: '0.5px' }}>{stat.label}</div>
+            <div style={{ fontSize: '1rem', color: stat.color, fontWeight: 'bold', textShadow: `0 0 20px ${stat.color}15` }}>{stat.value}</div>
+          </div>
+        ))}
       </div>
 
       {/* Main Layout */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', flex: 1, minHeight: 0 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', flex: 1, minHeight: 0, position: 'relative', zIndex: 1 }}>
         {/* Left: Canvas */}
-        <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <div style={{
+          background: glassBg,
+          backdropFilter: 'blur(12px)',
+          WebkitBackdropFilter: 'blur(12px)',
+          borderRadius: '12px',
+          border: `1px solid ${glassBorder}`,
+          padding: '10px',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
+          display: 'flex',
+          flexDirection: 'column',
+          minHeight: 0,
+          position: 'relative'
+        }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px', flexShrink: 0 }}>
-            <span style={{ fontSize: '0.65rem', color: '#94a3b8' }}>LIVE TELEMETRY</span>
-            <div style={{ display: 'flex', gap: '12px' }}>
+            <span style={{ fontSize: '0.65rem', color: textSecondary, letterSpacing: '0.5px' }}>LIVE TELEMETRY</span>
+            <div style={{ display: 'flex', gap: '16px' }}>
               <div>
-                <span style={{ fontSize: '0.5rem', color: '#64748b' }}>Temp</span>
-                <span style={{ fontSize: '0.85rem', color: '#38bdf8', fontWeight: 'bold', marginLeft: '4px' }}>
+                <span style={{ fontSize: '0.5rem', color: textSecondary }}>Temp</span>
+                <span style={{ fontSize: '0.85rem', color: chartLine, fontWeight: 'bold', marginLeft: '4px', textShadow: `0 0 20px ${chartLine}20` }}>
                   {latestTemp !== null ? latestTemp.toFixed(1) + '°C' : '--'}
                 </span>
               </div>
               <div>
-                <span style={{ fontSize: '0.5rem', color: '#64748b' }}>Vibration</span>
-                <span style={{ fontSize: '0.85rem', color: '#a78bfa', fontWeight: 'bold', marginLeft: '4px' }}>
+                <span style={{ fontSize: '0.5rem', color: textSecondary }}>Vibration</span>
+                <span style={{ fontSize: '0.85rem', color: accent, fontWeight: 'bold', marginLeft: '4px', textShadow: `0 0 20px ${accent}20` }}>
                   {latestVib !== null ? latestVib.toFixed(2) + ' Hz' : '--'}
                 </span>
               </div>
             </div>
           </div>
-          <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+          <div style={{ flex: 1, minHeight: 0, position: 'relative', borderRadius: '6px', overflow: 'hidden' }}>
             <canvas ref={canvasRef} style={{
-              border: `2px solid ${alertMuted ? '#1e293b' : '#22c55e'}`,
+              border: `1px solid ${alertMuted ? glassBorder : accent}`,
               borderRadius: '6px',
               width: '100%',
               height: '100%',
               display: 'block',
-              background: '#0f172a'
+              background: '#0B0E14'
             }} />
+            {isPaused && (
+              <div style={{
+                position: 'absolute',
+                top: '50%',
+                left: '50%',
+                transform: 'translate(-50%, -50%)',
+                background: 'rgba(0,0,0,0.6)',
+                backdropFilter: 'blur(8px)',
+                padding: '10px 20px',
+                borderRadius: '8px',
+                fontSize: '1rem',
+                color: accent,
+                fontWeight: 'bold',
+                border: `1px solid ${accent}40`,
+                pointerEvents: 'none'
+              }}>
+                ⏸ PAUSED
+              </div>
+            )}
+            {tooltip.visible && (
+              <div style={{
+                position: 'absolute',
+                left: Math.min(tooltip.x + 10, (canvasRef.current?.width || 0) - 220),
+                top: tooltip.y - 10,
+                background: 'rgba(11,14,20,0.9)',
+                backdropFilter: 'blur(8px)',
+                border: '1px solid rgba(42,49,60,0.5)',
+                borderRadius: '6px',
+                padding: '6px 10px',
+                fontSize: '0.55rem',
+                color: '#F1F5F9',
+                pointerEvents: 'none',
+                zIndex: 10,
+                boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+                whiteSpace: 'nowrap'
+              }}>
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <span>{tooltip.ts}</span>
+                  <span style={{ color: '#14B8A6' }}>T: {tooltip.temp}</span>
+                  <span style={{ color: '#F59E0B' }}>V: {tooltip.vib}</span>
+                  <span style={{ color: '#94A3B8' }}>{tooltip.device}</span>
+                  {tooltip.isFault && <span style={{ color: '#EF4444' }}>⚠️ Fault</span>}
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
         {/* Right: Sensor Grid + Fault Log */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', minHeight: 0 }}>
-          {/* Sensor Grid - Smaller Boxes */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', minHeight: 0 }}>
+          {/* Sensor Grid */}
           <div style={{
-            background: '#0a0f1a',
-            border: '1px solid #1e293b',
-            borderRadius: '6px',
-            padding: '6px',
+            background: glassBg,
+            backdropFilter: 'blur(12px)',
+            WebkitBackdropFilter: 'blur(12px)',
+            borderRadius: '12px',
+            border: `1px solid ${glassBorder}`,
+            padding: '8px',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
             flex: '0 0 auto'
           }}>
-            <div style={{ fontSize: '0.55rem', color: '#94a3b8', marginBottom: '4px', fontWeight: 'bold' }}>
+            <div style={{ fontSize: '0.55rem', color: textSecondary, marginBottom: '4px', fontWeight: 'bold', letterSpacing: '0.5px' }}>
               SENSOR GRID
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '3px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '4px' }}>
               {sensorIds.map(id => {
                 const data = sensorData[id];
                 const temp = data?.temp;
                 const status = sensorStatus[id] || 'inactive';
                 const isFault = data?.status === 'fault';
                 const isActive = status === 'active';
-                const borderColor = isActive ? '#22c55e' : (isFault ? '#ef4444' : '#1e293b');
+                const borderColor = isActive ? success : (isFault ? danger : glassBorder);
                 const valueStr = temp !== undefined && !isNaN(temp) ? temp.toFixed(1) + '°C' : '--';
                 return (
                   <div key={id} style={{
                     border: `1px solid ${borderColor}`,
-                    borderRadius: '3px',
-                    padding: '2px 4px',
+                    borderRadius: '6px',
+                    padding: '4px 2px',
                     textAlign: 'center',
-                    background: isFault ? 'rgba(239,68,68,0.08)' : 'transparent',
-                    opacity: alertMuted && isFault ? 0.5 : 1
+                    background: isFault ? 'rgba(239,68,68,0.08)' : 'rgba(255,255,255,0.02)',
+                    opacity: alertMuted && isFault ? 0.5 : 1,
+                    transition: 'all 0.2s'
                   }}>
-                    <div style={{ fontSize: '0.4rem', color: '#94a3b8' }}>{id.replace('sensor_', '')}</div>
-                    <div style={{ fontSize: '0.6rem', color: '#f8fafc', fontWeight: 'bold' }}>{valueStr}</div>
+                    <div style={{ fontSize: '0.4rem', color: textSecondary }}>{id.replace('sensor_', '')}</div>
+                    <div style={{ fontSize: '0.6rem', color: textPrimary, fontWeight: 'bold' }}>{valueStr}</div>
                   </div>
                 );
               })}
             </div>
           </div>
 
-          {/* Fault Log - Fixed Table */}
+          {/* Fault Log */}
           <div style={{
-            background: '#0a0f1a',
-            border: '1px solid #1e293b',
-            borderRadius: '6px',
-            padding: '6px',
+            background: glassBg,
+            backdropFilter: 'blur(12px)',
+            WebkitBackdropFilter: 'blur(12px)',
+            borderRadius: '12px',
+            border: `1px solid ${glassBorder}`,
+            padding: '8px',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
             flex: 1,
             minHeight: 0,
             overflow: 'hidden',
@@ -386,18 +563,19 @@ export default function App() {
           }}>
             <div style={{
               fontSize: '0.55rem',
-              color: alertMuted ? '#475569' : '#ef4444',
+              color: alertMuted ? textSecondary : danger,
               fontWeight: 'bold',
               marginBottom: '4px',
               display: 'flex',
-              justifyContent: 'space-between'
+              justifyContent: 'space-between',
+              letterSpacing: '0.5px'
             }}>
               <span>FAULT LOG</span>
-              <span style={{ fontSize: '0.5rem', color: '#475569' }}>{faultLog.length} events</span>
+              <span style={{ fontSize: '0.5rem', color: textSecondary }}>{faultLog.length} events</span>
             </div>
             <div style={{ flex: 1, overflowY: 'auto', fontSize: '0.5rem', fontFamily: 'monospace' }}>
               {faultLog.length === 0 ? (
-                <div style={{ color: '#475569', padding: '10px 0', textAlign: 'center' }}>No faults detected</div>
+                <div style={{ color: textSecondary, padding: '10px 0', textAlign: 'center' }}>No faults detected</div>
               ) : (
                 <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
                   <colgroup>
@@ -405,22 +583,15 @@ export default function App() {
                     <col style={{ width: '28%' }} />
                     <col style={{ width: '50%' }} />
                   </colgroup>
-                  <thead>
-                    <tr style={{ color: '#64748b', borderBottom: '1px solid #1e293b' }}>
-                      <th style={{ textAlign: 'left', padding: '2px' }}>Time</th>
-                      <th style={{ textAlign: 'left', padding: '2px' }}>Device</th>
-                      <th style={{ textAlign: 'left', padding: '2px' }}>Type</th>
-                    </tr>
-                  </thead>
                   <tbody>
                     {faultLog.slice(0, 10).map((fault, idx) => (
                       <tr key={idx} style={{
-                        borderBottom: '1px solid rgba(30,41,59,0.3)',
+                        borderBottom: `1px solid ${glassBorder}`,
                         opacity: alertMuted ? 0.4 : 1,
                       }}>
-                        <td style={{ padding: '2px', color: '#94a3b8', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fault.time}</td>
-                        <td style={{ padding: '2px', color: '#e2e8f0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fault.device}</td>
-                        <td style={{ padding: '2px', color: alertMuted ? '#94a3b8' : '#fca5a5', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={fault.type}>
+                        <td style={{ padding: '4px 2px', color: textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fault.time}</td>
+                        <td style={{ padding: '4px 2px', color: textPrimary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fault.device}</td>
+                        <td style={{ padding: '4px 2px', color: alertMuted ? textSecondary : danger, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', wordBreak: 'break-word' }} title={fault.type}>
                           {fault.type}
                         </td>
                       </tr>

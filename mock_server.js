@@ -2,7 +2,7 @@
 import { WebSocketServer } from 'ws';
 
 const wss = new WebSocketServer({ port: 8080 });
-console.log("⚡ [MOCK SERVER] Running at ws://localhost:8080 (500 Hz Stream)");
+console.log("[MOCK SERVER] Running at ws://localhost:8080 (500 Hz Stream)");
 
 wss.on('connection', (ws) => {
   let seq = 0;
