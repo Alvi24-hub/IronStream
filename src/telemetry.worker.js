@@ -1,4 +1,14 @@
 // telemetry.worker.js
+let frameRequested = false;
+const requestCanvasUpdate = () => {
+  if (!frameRequested) {
+    frameRequested = true;
+    requestAnimationFrame(() => {
+      frameRequested = false;
+      drawCanvas();
+    });
+  }
+};
 let canvas = null;
 let ctx = null;
 let ws = null;

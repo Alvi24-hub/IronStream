@@ -8,7 +8,7 @@ import random
 import time
 import websockets
 
-URI = "ws://localhost:8000/ws/ingest"
+URI = "wss://ironstream-backend-89io.onrender.com/ws/ingest"
 RATE_HZ = 500
 INTERVAL = 1.0 / RATE_HZ  # 0.002 seconds = 2ms
 FAULT_RATE = 0.08
