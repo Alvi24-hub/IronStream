@@ -5,9 +5,6 @@ export default function App() {
   const workerRef = useRef(null);
   const channelRef = useRef(null);
   const isInitialized = useRef(false);
-  const sensorBatch = useRef({});
-const batchTimer = useRef(null);
-const eventBatch = useRef({ count: 0, faults: 0 });
 
   const [alertMuted, setAlertMuted] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -54,40 +51,29 @@ const REPLAY_URL = 'https://ironstream-backend-89io.onrender.com/api/replay';
         console.log('[APP] Received message type:', e.data.type);
 
         if (e.data.type === 'TELEMETRY_DATA') {
-  const data = e.data.payload;
-  const deviceId = data.device_id || data.device || 'unknown';
-  let temp = data?.payload?.metrics?.temperature ?? data?.metrics?.temperature ?? data?.temperature;
-  let vib = data?.payload?.metrics?.vibration ?? data?.metrics?.vibration ?? data?.vibration;
+          const data = e.data.payload;
+          const deviceId = data.device_id || data.device || 'unknown';
+          let temp = data?.payload?.metrics?.temperature ?? data?.metrics?.temperature ?? data?.temperature;
+          let vib = data?.payload?.metrics?.vibration ?? data?.metrics?.vibration ?? data?.vibration;
 
-  if (temp !== undefined && !isNaN(temp) && typeof temp === 'number') {
-    const now = Date.now();
-    // Accumulate in batch
-    sensorBatch.current[deviceId] = {
-      temp: temp,
-      vibration: vib,
-      status: 'normal',
-      lastUpdate: now
-    };
-    eventBatch.current.count += 1;
-    if (data.type === 'fault' || data.is_fault) eventBatch.current.faults += 1;
+          if (temp !== undefined && !isNaN(temp) && typeof temp === 'number') {
+            setLatestTemp(temp);
+            if (vib !== undefined && !isNaN(vib)) setLatestVib(vib);
+            setTotalEvents(prev => prev + 1);
+            eventCountRef.current += 1;
+            const now = Date.now();
+            setSensorData(prev => ({
+              ...prev,
+              [deviceId]: {
+                temp: temp,
+                vibration: vib,
+                status: 'normal',
+                lastUpdate: now
+              }
+            }));
+          }
+        }
 
-    // Flush every 100ms
-    if (!batchTimer.current) {
-      batchTimer.current = setTimeout(() => {
-        // Update sensor data
-        setSensorData(prev => ({ ...prev, ...sensorBatch.current }));
-        sensorBatch.current = {};
-        // Update total events
-        setTotalEvents(prev => prev + eventBatch.current.count);
-        eventCountRef.current += eventBatch.current.count;
-        setFaultCount(prev => prev + eventBatch.current.faults);
-        faultCountRef.current += eventBatch.current.faults;
-        eventBatch.current = { count: 0, faults: 0 };
-        batchTimer.current = null;
-      }, 100);
-    }
-  }
-}
         if (e.data.type === 'FAULT_EVENT') {
           const fault = e.data.payload;
           setFaultCount(prev => prev + 1);
