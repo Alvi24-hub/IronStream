@@ -63,26 +63,26 @@ function connectWebSocket(url) {
     ws.onopen = () => {
       console.log('[WORKER] WebSocket connected');
       self.postMessage({ type: 'WS_CONNECTED' });
-      // Send test message every 2 seconds to verify communication
-      setInterval(() => {
-        self.postMessage({
-          type: 'TEST_MESSAGE',
-          payload: { msg: 'ping from worker' }
-        });
-      }, 2000);
     };
     ws.onmessage = (event) => {
-      console.log('[WORKER] RAW DATA:', event.data.slice(0, 200));
+      console.log('[WORKER] 📩 RAW DATA received');
       try {
         const data = JSON.parse(event.data);
-        console.log('[WORKER] Parsed:', data.type || 'unknown');
-        self.postMessage({ type: 'TELEMETRY_DATA', payload: data });
-        console.log('[WORKER] TELEMETRY_DATA sent to main thread');
-        if (!paused) {
+        console.log('[WORKER] Parsed type:', data.type || 'unknown');
+        
+        // Forward to main App
+        self.postMessage({ 
+          type: 'TELEMETRY_DATA', 
+          payload: data 
+        });
+        
+        // Draw on canvas if not paused and canvas ready
+        if (!paused && canvas && ctx) {
           processData(data, false);
         }
+        
       } catch (err) {
-        console.warn('[WORKER] Parse error:', err);
+        console.warn('[WORKER] ❌ Parse error:', err);
         self.postMessage({
           type: 'FAULT_EVENT',
           payload: {
@@ -112,41 +112,74 @@ function processData(data, isReplay) {
   let temp = null;
   let vib = null;
   let flags = data.flags || [];
-  const isFault = data.type === 'fault' || (flags && flags.length > 0) || data.is_fault;
-
-  // --- Robust extraction ---
-  if (data.payload) {
-    if (data.payload.metrics) {
-      temp = data.payload.metrics.temperature;
-      vib = data.payload.metrics.vibration;
-    } else if (data.payload.raw) {
-      let rawObj = data.payload.raw;
-      if (typeof rawObj === 'string') {
-        try {
-          rawObj = JSON.parse(rawObj);
-        } catch (e) {
-          rawObj = null;
-        }
-      }
-      if (rawObj) {
-        if (rawObj.metrics) {
-          temp = rawObj.metrics.temperature;
-          vib = rawObj.metrics.vibration;
-        } else if (rawObj.temperature !== undefined) {
-          temp = rawObj.temperature;
-          vib = rawObj.vibration;
-        }
-      }
+  
+  // ✅ IMPROVED FAULT DETECTION
+  let isFault = data.type === 'fault' || (flags && flags.length > 0) || data.is_fault;
+  
+  // ✅ Check for NaN, null, undefined, INVALID_TS in the data
+  if (data.payload && data.payload.metrics) {
+    const metrics = data.payload.metrics;
+    if (metrics.temperature === "NaN" || metrics.temperature === null || metrics.temperature === undefined) {
+      isFault = true;
+      if (!flags.includes('NaN')) flags.push('NaN');
     }
-  } else if (data.metrics) {
-    temp = data.metrics.temperature;
-    vib = data.metrics.vibration;
-  } else if (data.temperature !== undefined) {
-    temp = data.temperature;
-    vib = data.vibration;
+    if (metrics.vibration === "NaN" || metrics.vibration === null || metrics.vibration === undefined) {
+      isFault = true;
+      if (!flags.includes('NaN')) flags.push('NaN');
+    }
+    temp = typeof metrics.temperature === 'number' ? metrics.temperature : null;
+    vib = typeof metrics.vibration === 'number' ? metrics.vibration : null;
+  }
+  
+  // ✅ Check if temp/vib are NaN strings
+  if (temp === null && data.payload && data.payload.temperature !== undefined) {
+    const val = data.payload.temperature;
+    if (val === "NaN" || val === null || val === undefined) {
+      isFault = true;
+      if (!flags.includes('NaN')) flags.push('NaN');
+    } else {
+      temp = typeof val === 'number' ? val : parseFloat(val);
+    }
+  }
+  
+  if (vib === null && data.payload && data.payload.vibration !== undefined) {
+    const val = data.payload.vibration;
+    if (val === "NaN" || val === null || val === undefined) {
+      isFault = true;
+      if (!flags.includes('NaN')) flags.push('NaN');
+    } else {
+      vib = typeof val === 'number' ? val : parseFloat(val);
+    }
+  }
+  
+  // ✅ Check direct data fields
+  if (temp === null && data.temperature !== undefined) {
+    const val = data.temperature;
+    if (val === "NaN" || val === null || val === undefined) {
+      isFault = true;
+      if (!flags.includes('NaN')) flags.push('NaN');
+    } else {
+      temp = typeof val === 'number' ? val : parseFloat(val);
+    }
+  }
+  
+  if (vib === null && data.vibration !== undefined) {
+    const val = data.vibration;
+    if (val === "NaN" || val === null || val === undefined) {
+      isFault = true;
+      if (!flags.includes('NaN')) flags.push('NaN');
+    } else {
+      vib = typeof val === 'number' ? val : parseFloat(val);
+    }
   }
 
-  console.log('[WORKER] Extracted temp:', temp, 'vib:', vib, 'isFault:', isFault);
+  // ✅ Check for INVALID_TS
+  if (data.timestamp === "INVALID_TS" || data.payload?.timestamp === "INVALID_TS") {
+    isFault = true;
+    if (!flags.includes('INVALID_TS')) flags.push('INVALID_TS');
+  }
+
+  console.log('[WORKER] Extracted temp:', temp, 'vib:', vib, 'isFault:', isFault, 'flags:', flags);
 
   // Send fault event to main thread
   if (isFault) {
@@ -159,11 +192,11 @@ function processData(data, isReplay) {
         raw: JSON.stringify(data)
       }
     });
-    console.log('[WORKER] FAULT_EVENT sent to main thread');
   }
 
   const hasTemp = temp !== null && !isNaN(temp) && typeof temp === 'number';
   const hasVib = vib !== null && !isNaN(vib) && typeof vib === 'number';
+  
   if (hasTemp || hasVib) {
     dataPoints.push({
       ts: Date.now(),
@@ -216,7 +249,7 @@ function drawCanvas() {
   const VIB_MIN = 0, VIB_MAX = 10;
   const mapY = (val, min, max) => padding.top + chartH - ((val - min) / (max - min)) * chartH;
 
-  // Temp curve
+  // Temp curve (Teal)
   ctx.strokeStyle = TEMP_COLOR;
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -231,7 +264,7 @@ function drawCanvas() {
   }
   ctx.stroke();
 
-  // Vib curve
+  // Vib curve (Amber)
   ctx.strokeStyle = VIB_COLOR;
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -246,7 +279,7 @@ function drawCanvas() {
   }
   ctx.stroke();
 
-  // Fault markers
+  // Fault markers (Red circles)
   for (let i = 0; i < dataPoints.length; i++) {
     const p = dataPoints[i];
     if (!p.isFault) continue;
@@ -310,3 +343,4 @@ function sendTooltipData(x) {
     self.postMessage({ type: 'TOOLTIP', payload: tooltip });
   }
 }
+

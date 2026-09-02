@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import asyncpg
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Depends, Request
 from fastapi.responses import JSONResponse
 
 # =============================================================================
@@ -152,7 +152,7 @@ app = FastAPI(title="IronStream Dashboard", lifespan=lifespan)
 async def websocket_ingest(websocket: WebSocket):
     await websocket.accept()
     ui_clients.append(websocket)
-    print("[INGEST] Sensor stream connected")
+    print(f"[INGEST] Sensor stream connected. Total clients: {len(ui_clients)}")
     try:
         while True:
             message = await websocket.receive()
@@ -213,6 +213,7 @@ async def websocket_ingest(websocket: WebSocket):
     finally:
         if websocket in ui_clients:
             ui_clients.remove(websocket)
+            print(f"[INGEST] Client removed. Total clients: {len(ui_clients)}")
 
 # =============================================================================
 # REPLAY ENDPOINT (O(1) Flush from RAM)
@@ -270,44 +271,28 @@ if __name__ == "__main__":
         log_level="warning"
     )
 
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "online",
-        "ring_buffer_size": len(ring_buffer),
-        "db_connected": db_pool is not None,
-        "clients": len(ui_clients)
-    }
 # ============================================================
-# HEALTH CHECK - Added to existing main.py
+# HEALTH CHECK
 # ============================================================
 
 @app.get("/health")
 async def health_check():
     """Enhanced health check with system status"""
-    import psutil
     from datetime import datetime
+    import psutil
     
     # Get WebSocket stats
-    ws_stats = {}
-    if 'websocket_manager' in globals() and websocket_manager:
-        ws_stats = {
-            "active_connections": len(websocket_manager.clients),
-            "status": "healthy"
-        }
-    else:
-        ws_stats = {"status": "not_initialized"}
+    ws_stats = {
+        "active_connections": len(ui_clients),
+        "status": "healthy"
+    }
     
     # Get buffer stats
-    buffer_stats = {}
-    if 'ring_buffer' in globals() and ring_buffer:
-        buffer_stats = {
-            "size": len(ring_buffer),
-            "max_size": ring_buffer._maxlen if hasattr(ring_buffer, '_maxlen') else 30000,
-            "status": "healthy"
-        }
-    else:
-        buffer_stats = {"status": "not_initialized"}
+    buffer_stats = {
+        "size": len(ring_buffer),
+        "max_size": RING_BUFFER_SIZE,
+        "status": "healthy"
+    }
     
     # System metrics
     try:
@@ -341,10 +326,8 @@ async def liveness():
     """Kubernetes liveness probe"""
     return {"status": "alive"}
 
-
-
 # ============================================================
-# CLEAN METRICS - Using metrics.py
+# METRICS
 # ============================================================
 
 from metrics import get_metrics, get_content_type, update_websocket_count, update_ring_buffer_count
@@ -353,10 +336,8 @@ from fastapi import Response
 @app.get("/metrics")
 async def metrics():
     """Prometheus metrics endpoint"""
-    if 'websocket_manager' in globals() and websocket_manager:
-        update_websocket_count(len(websocket_manager.clients))
-    if 'ring_buffer' in globals() and ring_buffer:
-        update_ring_buffer_count(len(ring_buffer))
+    update_websocket_count(len(ui_clients))
+    update_ring_buffer_count(len(ring_buffer))
     
     return Response(
         content=get_metrics(),
@@ -364,21 +345,17 @@ async def metrics():
     )
 
 # ============================================================
-# RATE LIMITING (REST endpoints only)
+# RATE LIMITING
 # ============================================================
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-# Create rate limiter
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
-
-# Add exception handler
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Apply to specific endpoints
 @app.get("/api/replay")
 @limiter.limit("60/minute")
 async def rate_limited_replay(request: Request):
@@ -387,11 +364,11 @@ async def rate_limited_replay(request: Request):
         return {"error": "Ring buffer not initialized"}
     
     try:
-        events = await ring_buffer.get_snapshot()
+        events = list(ring_buffer)
         return {
             "events": events,
             "count": len(events),
-            "capacity": ring_buffer._maxlen if hasattr(ring_buffer, '_maxlen') else 30000,
+            "capacity": RING_BUFFER_SIZE,
             "replay_ms": int(time.time() * 1000)
         }
     except Exception as e:
@@ -409,10 +386,8 @@ async def rate_limited_historical(request: Request):
 
 from app.middleware import RequestLoggingMiddleware
 
-# Add middleware (add it before other middleware)
 app.add_middleware(RequestLoggingMiddleware)
 
-# Configure logging format
 import logging
 logging.basicConfig(
     level=logging.INFO,
@@ -425,13 +400,10 @@ logging.basicConfig(
 
 from app.models import SensorData, HistoricalQuery, ReplayQuery
 
-# Ingest endpoint with validation
 @app.post("/api/ingest")
 async def ingest_sensor_data(data: SensorData):
     """Ingest sensor data with validation"""
     try:
-        # Process validated data
-        # Your existing ingestion logic here
         return {
             "status": "success",
             "message": f"Data from {data.device_id} ingested",
@@ -440,7 +412,6 @@ async def ingest_sensor_data(data: SensorData):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# Replay endpoint with validation
 @app.get("/api/replay/validated")
 async def replay_validated(query: ReplayQuery = Depends()):
     """Replay endpoint with validated query parameters"""
@@ -448,7 +419,7 @@ async def replay_validated(query: ReplayQuery = Depends()):
         return {"error": "Ring buffer not initialized"}
     
     try:
-        events = await ring_buffer.get_snapshot()
+        events = list(ring_buffer)
         if query.device_id:
             events = [e for e in events if e.get('device_id') == query.device_id]
         
@@ -463,3 +434,5 @@ async def replay_validated(query: ReplayQuery = Depends()):
         }
     except Exception as e:
         return {"error": str(e)}
+
+    

@@ -21,7 +21,7 @@ export default function App() {
   const [faultLog, setFaultLog] = useState([]);
   const [tooltip, setTooltip] = useState({ visible: false, x: 0, y: 0, ts: '', temp: '', vib: '', device: '', isFault: false });
 
-  const WS_URL = 'ws://172.16.44.68:8000/ws/ingest';
+  const WS_URL = 'ws://localhost:8000/ws/ingest';
   const REPLAY_URL = 'http://172.16.44.68:8000/api/replay';
   const startTime = Date.now();
 
